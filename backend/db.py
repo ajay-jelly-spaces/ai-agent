@@ -4,7 +4,7 @@ Reads credentials from environment variables.
 """
 
 import os
-from typing import Optional
+from typing import List, Optional
 
 import pandas as pd
 from sqlalchemy import create_engine, text
@@ -86,6 +86,20 @@ def get_tables(schema: str = "public") -> pd.DataFrame:
         ORDER BY table_schema, table_name
     """
     return run_select_query(query, params={"schema": schema})
+
+
+def get_table_columns(schema: str, table: str) -> List[str]:
+    """
+    Return list of column names that actually exist for the given table.
+    """
+    query = """
+        SELECT column_name
+        FROM information_schema.columns
+        WHERE table_schema = :schema AND table_name = :table
+        ORDER BY ordinal_position
+    """
+    df = run_select_query(query, params={"schema": schema, "table": table})
+    return df["column_name"].tolist() if len(df) > 0 else []
 
 
 def get_schema_info(schema: str = "public") -> str:

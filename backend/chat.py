@@ -1,6 +1,6 @@
 """
 Chat assistant for natural language to SQL queries.
-Uses Mistral API to convert user questions to SQL and format responses.
+Uses RAG system where AI has no direct database access.
 """
 
 import os
@@ -8,17 +8,18 @@ from typing import Optional
 
 import pandas as pd
 
-from backend.db import get_schema_info, run_select_query
+from backend.db import run_select_query
+from backend.allowed_schema import get_allowed_schema_info, validate_sql_allowed
+from backend.rag_knowledge import RAGChatInterface
 
 
-SYSTEM_PROMPT = """You are a helpful PostgreSQL assistant. Given a database schema and a user question, you must respond with ONLY a valid PostgreSQL SELECT query. No explanations, no markdown, no backticks - just the raw SQL.
+SYSTEM_PROMPT = """You are a helpful PostgreSQL assistant. Given the ALLOWED schema and a user question, you must respond with ONLY a valid PostgreSQL SELECT query. No explanations, no markdown, no backticks - just the raw SQL.
 
-You can query:
-1. User tables (listed in the schema) for data questions.
-2. information_schema.tables for table count, list of tables - use table_schema, table_name, table_type.
-3. information_schema.columns for column metadata.
+You may ONLY use tables and columns listed in the ALLOWED SCHEMA. If the user asks for specific columns, select only those columns (and only if they appear in the approved column list for that table). If the user does not specify columns, you may use SELECT * or list all approved columns for that table.
 
-If the question cannot be answered at all, respond with: ERROR: <brief reason>."""
+You may also use information_schema.tables and information_schema.columns for metadata (e.g. table count, list tables).
+
+If the question cannot be answered with the allowed schema, respond with: ERROR: <brief reason>."""
 
 SUMMARY_PROMPT = """Summarize these query results in 1-2 sentences for the user. Be concise and conversational."""
 
@@ -110,19 +111,29 @@ def ask_database(
     schema: str = "public",
 ) -> tuple[Optional[pd.DataFrame], str]:
     """
-    Process a natural language question: generate SQL, execute, return results and response.
-
+    Process a natural language question using RAG system.
+    AI has no direct database access - only works with knowledge and secure APIs.
+    
     Returns:
         Tuple of (DataFrame or None, response text)
     """
-    schema_info = get_schema_info(schema)
-
-    sql = get_sql_from_question(question, schema_info)
-
-    if not sql.strip().upper().startswith("SELECT"):
-        raise ValueError("Generated query must be a SELECT statement.")
-
-    df = run_select_query(sql)
-    summary = summarize_results(df)
-
-    return df, summary
+    try:
+        # Use RAG interface with fresh knowledge base
+        rag_interface = RAGChatInterface(schema)
+        # Force rebuild to get latest table information
+        rag_interface.assistant._initialize_knowledge_base(force_rebuild=True)
+        return rag_interface.ask_database(question, schema)
+    except Exception as e:
+        # Fallback to original method if RAG fails
+        try:
+            # Use allowed schema so Mistral only generates SELECTs with approved tables/columns
+            schema_info = get_allowed_schema_info(schema)
+            sql = get_sql_from_question(question, schema_info)
+            if not sql.strip().upper().startswith("SELECT"):
+                raise ValueError("Generated query must be a SELECT statement.")
+            validate_sql_allowed(sql, schema)
+            df = run_select_query(sql)
+            summary = summarize_results(df)
+            return df, summary
+        except Exception as fallback_error:
+            return None, str(fallback_error)
